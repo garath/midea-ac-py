@@ -26,6 +26,10 @@ CONF_SWING_ANGLE_RTL = "swing_angle_rtl"
 CONF_DEVICE_TYPE = "device_type"
 CONF_CAPABILITY_OVERRIDES = "capability_overrides"
 CONF_MERGE_CAPABILITY_OVERRIDES = "merge_capability_overrides"
+# MAC address resolved via DHCP discovery. Stored on the config entry so it can
+# be used to link this device with network-based integrations (e.g. UniFi
+# Network) via a CONNECTION_NETWORK_MAC device registry connection.
+CONF_MAC = "mac"
 
 PRESET_IECO = "ieco"
 PRESET_SILENT = "silent"
