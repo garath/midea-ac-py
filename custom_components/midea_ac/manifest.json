@@ -6,6 +6,10 @@
   ],
   "config_flow": true,
   "dependencies": [],
+  "dhcp": [
+    { "hostname": "midea_*" },
+    { "hostname": "net_ac_*" }
+  ],
   "documentation": "https://github.com/mill1000/midea-ac-py",
   "iot_class": "local_polling",
   "issue_tracker": "https://github.com/mill1000/midea-ac-py/issues",
