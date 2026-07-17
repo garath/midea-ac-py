@@ -15,6 +15,7 @@ from homeassistant.const import (CONF_COUNTRY_CODE, CONF_HOST, CONF_ID,
 from homeassistant.core import callback
 from homeassistant.data_entry_flow import section
 from homeassistant.helpers import httpx_client
+from homeassistant.helpers.device_registry import format_mac
 from homeassistant.helpers.selector import (CountrySelector,
                                             CountrySelectorConfig,
                                             NumberSelector,
@@ -24,6 +25,7 @@ from homeassistant.helpers.selector import (CountrySelector,
                                             SelectSelectorMode, TextSelector,
                                             TextSelectorConfig,
                                             TextSelectorType)
+from homeassistant.helpers.service_info.dhcp import DhcpServiceInfo
 from msmart.base_device import Device
 from msmart.const import DeviceType
 from msmart.device import AirConditioner as AC
@@ -35,7 +37,7 @@ from .const import (CONF_BEEP, CONF_CAPABILITY_OVERRIDES,
                     CONF_CLOUD_COUNTRY_CODES, CONF_DEFAULT_CLOUD_COUNTRY,
                     CONF_DEVICE_TYPE, CONF_ENERGY_DATA_FORMAT,
                     CONF_ENERGY_DATA_SCALE, CONF_ENERGY_SENSOR,
-                    CONF_FAN_SPEED_STEP, CONF_KEY,
+                    CONF_FAN_SPEED_STEP, CONF_KEY, CONF_MAC,
                     CONF_MAX_CONNECTION_LIFETIME,
                     CONF_MERGE_CAPABILITY_OVERRIDES, CONF_POWER_SENSOR,
                     CONF_SWING_ANGLE_RTL, CONF_TEMP_STEP,
@@ -80,11 +82,92 @@ class MideaConfigFlow(ConfigFlow, domain=DOMAIN):
     VERSION = 1
     MINOR_VERSION = 6
 
+    # MAC address resolved from a DHCP discovery, if any. Stored on the flow so
+    # it can be persisted to the config entry when the entry is created.
+    _discovered_mac: str | None = None
+
     async def async_step_user(self, user_input=None) -> ConfigFlowResult:
         """Handle a config flow initialized by the user."""
         return self.async_show_menu(
             step_id="user",
             menu_options=["discover", "manual"],
+        )
+
+    async def async_step_dhcp(
+        self, discovery_info: DhcpServiceInfo
+    ) -> ConfigFlowResult:
+        """Handle a flow initialized by DHCP discovery.
+
+        Home Assistant sniffs DHCP traffic and provides the device's IP,
+        MAC address and hostname. We use the IP to locate the Midea device
+        via the local discovery protocol and the MAC to link the resulting
+        device with network-based integrations (e.g. UniFi Network).
+        """
+        host = discovery_info.ip
+        mac = format_mac(discovery_info.macaddress)
+
+        _LOGGER.debug(
+            "DHCP discovery: host=%s, mac=%s, hostname=%s",
+            host, mac, discovery_info.hostname)
+
+        # Attempt to find the device at the discovered IP. Use auto_connect
+        # False to avoid a cloud round-trip during passive discovery.
+        device = await Discover.discover_single(
+            host,
+            auto_connect=False,
+            timeout=2,
+            get_async_client=self._get_async_client
+        )
+
+        # If the device can't be located or isn't a supported type, bail out
+        # quietly. DHCP discovery is passive so we don't surface an error.
+        if device is None:
+            return self.async_abort(reason="device_not_found")
+
+        if device.type not in [DeviceType.AIR_CONDITIONER, DeviceType.COMMERCIAL_AC]:
+            return self.async_abort(reason="unsupported_device")
+
+        # Set the unique ID to the Midea device ID. If this device is already
+        # configured, update its host and MAC (both can change over time) and
+        # abort. This dedupes DHCP discoveries against existing entries.
+        await self.async_set_unique_id(str(device.id))
+        self._abort_if_unique_id_configured(
+            updates={CONF_HOST: host, CONF_MAC: mac}
+        )
+
+        # Save discovery context for the confirmation step
+        self._device = device
+        self._discovered_mac = mac
+
+        # Present the discovered device in the UI as a discovered entry
+        self.context["title_placeholders"] = {
+            "name": f"{device.name} ({host})"
+        }
+
+        return await self.async_step_dhcp_confirm()
+
+    async def async_step_dhcp_confirm(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Confirm addition of a DHCP-discovered device."""
+
+        if user_input is not None:
+            device = self._device
+
+            # Finish connecting to the device
+            try:
+                if await Discover.connect(device):
+                    assert isinstance(device, (AC, CC))
+                    return await self.async_step_show_token_key(device=device)
+                return self.async_abort(reason="cannot_connect")
+            except CloudError:
+                return self.async_abort(reason="cloud_connection_failed")
+
+        return self.async_show_form(
+            step_id="dhcp_confirm",
+            description_placeholders={
+                "name": self.context["title_placeholders"]["name"]
+            },
         )
 
     async def async_step_discover(
@@ -430,6 +513,12 @@ class MideaConfigFlow(ConfigFlow, domain=DOMAIN):
             CONF_TOKEN: device.token,
             CONF_KEY: device.key,
         }
+
+        # Persist the MAC address if one was resolved via DHCP discovery. This
+        # is used to link the device with network-based integrations via a
+        # CONNECTION_NETWORK_MAC device registry connection.
+        if self._discovered_mac is not None:
+            data[CONF_MAC] = self._discovered_mac
 
         # Build default options based on device type
         default_options = _DEFAULT_OPTIONS
